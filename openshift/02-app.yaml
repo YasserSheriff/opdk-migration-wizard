@@ -1,0 +1,70 @@
+# The Secret `opdk-wizard-env` (key BOB_API_URL) is NOT in this file: the CI/CD workflow creates it
+# from the GitHub repository secret BOB_API_URL. The workflow also replaces the image line below
+# with the digest of the image it just built, and __ENV_HASH__ with a hash of the secret values so
+# that changing a secret restarts the pods.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opdk-migration-wizard
+  labels: { app: opdk-migration-wizard, app.kubernetes.io/part-of: opdk-migration-wizard }
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: opdk-migration-wizard }
+  template:
+    metadata:
+      labels: { app: opdk-migration-wizard, app.kubernetes.io/part-of: opdk-migration-wizard }
+      annotations:
+        opdk-migration-wizard/env-hash: "__ENV_HASH__"
+    spec:
+      containers:
+        - name: app
+          image: image-registry.openshift-image-registry.svc:5000/opdk-migration-wizard/opdk-migration-wizard:latest
+          ports:
+            - { name: http, containerPort: 8080 }
+          env:
+            - { name: PORT, value: "8080" }
+          envFrom:
+            - secretRef: { name: opdk-wizard-env }
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { cpu: 500m, memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          startupProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 3
+            failureThreshold: 20
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 20
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 10
+            failureThreshold: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: opdk-migration-wizard
+  labels: { app: opdk-migration-wizard, app.kubernetes.io/part-of: opdk-migration-wizard }
+spec:
+  selector: { app: opdk-migration-wizard }
+  ports:
+    - { name: http, port: 8080, targetPort: http }
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: opdk-migration-wizard
+  labels: { app: opdk-migration-wizard, app.kubernetes.io/part-of: opdk-migration-wizard }
+  annotations:
+    # A Bob run is a single synchronous request that can take minutes; raise the router timeout.
+    haproxy.router.openshift.io/timeout: 15m
+spec:
+  to: { kind: Service, name: opdk-migration-wizard }
+  port: { targetPort: http }
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

@@ -1,0 +1,24 @@
+# Image stream + binary Docker build. The build runs inside the cluster (amd64) and pushes to the
+# internal registry, so no external registry credentials are needed.
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: opdk-migration-wizard
+  labels: { app.kubernetes.io/part-of: opdk-migration-wizard }
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: opdk-migration-wizard
+  labels: { app.kubernetes.io/part-of: opdk-migration-wizard }
+spec:
+  source:
+    type: Binary
+  strategy:
+    type: Docker
+    dockerStrategy:
+      dockerfilePath: Dockerfile
+  output:
+    to: { kind: ImageStreamTag, name: "opdk-migration-wizard:latest" }
+  resources:
+    limits: { cpu: "2", memory: 2Gi }

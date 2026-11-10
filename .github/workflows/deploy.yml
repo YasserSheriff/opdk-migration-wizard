@@ -1,0 +1,123 @@
+name: CI/CD - build and deploy to OpenShift
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['**.md']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      namespace:
+        description: 'OpenShift project to deploy to (must already exist and be writable by the token)'
+        type: string
+        default: opdk-migration-wizard
+
+permissions:
+  contents: read
+
+env:
+  OPENSHIFT_NAMESPACE: ${{ inputs.namespace || 'opdk-migration-wizard' }}
+  OC_VERSION_CHANNEL: stable-4.16
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install, test and build
+        run: |
+          npm ci
+          npm test
+          npm run build
+
+  deploy:
+    # Only deploy from pushes to main (or a manual run on main). Pull requests never get secrets.
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: openshift-deploy
+      cancel-in-progress: false
+    env:
+      OPENSHIFT_SERVER: ${{ secrets.OPENSHIFT_SERVER }}
+      OPENSHIFT_TOKEN: ${{ secrets.OPENSHIFT_TOKEN }}
+      BOB_API_URL: ${{ secrets.BOB_API_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check required secrets
+        run: |
+          missing=0
+          for v in OPENSHIFT_SERVER OPENSHIFT_TOKEN BOB_API_URL; do
+            if [ -z "${!v}" ]; then echo "::error::Repository secret $v is not set"; missing=1; fi
+          done
+          exit $missing
+
+      - name: Validate namespace input
+        run: |
+          case "$OPENSHIFT_NAMESPACE" in
+            ''|*[!a-z0-9-]*|-*|*-) echo "::error::Invalid namespace '$OPENSHIFT_NAMESPACE'"; exit 1;;
+          esac
+
+      - name: Install oc CLI
+        run: |
+          base="https://mirror.openshift.com/pub/openshift-v4/clients/ocp/${OC_VERSION_CHANNEL}"
+          curl -fsSL -o /tmp/oc.tar.gz "$base/openshift-client-linux.tar.gz"
+          curl -fsSL -o /tmp/sha256sum.txt "$base/sha256sum.txt"
+          expected=$(grep ' openshift-client-linux.tar.gz$' /tmp/sha256sum.txt | awk '{print $1}')
+          echo "$expected  /tmp/oc.tar.gz" | sha256sum -c -
+          sudo tar -xzf /tmp/oc.tar.gz -C /usr/local/bin oc
+          oc version --client
+
+      - name: Log in to OpenShift
+        run: |
+          oc login --token="$OPENSHIFT_TOKEN" --server="$OPENSHIFT_SERVER"
+          oc project "$OPENSHIFT_NAMESPACE"
+          echo "Logged in as $(oc whoami)"
+
+      # Image stream + build config are safe to re-apply: they do not restart any pods.
+      - name: Apply build configuration
+        run: oc apply -f openshift/01-builds.yaml
+
+      # The env variables live in an OpenShift Secret, created from the GitHub secret.
+      - name: Create or update the env Secret
+        run: |
+          oc create secret generic opdk-wizard-env \
+            --from-literal=BOB_API_URL="$BOB_API_URL" \
+            --dry-run=client -o yaml | oc apply -f -
+          oc label secret opdk-wizard-env app.kubernetes.io/part-of=opdk-migration-wizard --overwrite
+
+      - name: Build image
+        run: oc start-build opdk-migration-wizard --from-dir=. --follow --wait
+
+      - name: Apply app manifests with the new image
+        run: |
+          image=$(oc get istag opdk-migration-wizard:latest -o jsonpath='{.image.dockerImageReference}')
+          [ -n "$image" ] || { echo "::error::Could not resolve the built image"; exit 1; }
+          echo "Deploying $image"
+          # Hash of the secret values: a changed secret changes the pod template and restarts the pods.
+          env_hash=$(oc get secret opdk-wizard-env -o jsonpath='{.data}' | sha256sum | cut -c1-16)
+          sed -e "s#^\( *image:\).*#\1 ${image}#" -e "s#__ENV_HASH__#${env_hash}#" openshift/02-app.yaml | oc apply -f -
+          oc rollout status deployment/opdk-migration-wizard --timeout=300s
+
+      - name: Smoke test
+        run: |
+          host=$(oc get route opdk-migration-wizard -o jsonpath='{.spec.host}')
+          for _ in $(seq 1 12); do
+            # An empty body is rejected with 400 only if BOB_API_URL is configured (no Bob call is made).
+            code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{}' "https://$host/api/bob/prompt" || true)
+            if curl -fsS "https://$host/readyz" >/dev/null && curl -fsS -o /dev/null "https://$host/" && [ "$code" = "400" ]; then
+              echo "Deployed OK: https://$host"; exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::Smoke test failed (proxy returned HTTP $code)"; oc get pods; exit 1
