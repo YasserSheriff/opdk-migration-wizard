@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, waitFor, fireEvent, act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { buildBobPrompt } from '../bobPrompt.js'
+import { buildBobPrompt, resolveBobPrompt } from '../bobPrompt.js'
 import { initialState } from '../validation.js'
 import BobConsole, { DEFAULT_POLL_MS } from '../components/BobConsole.jsx'
 
@@ -24,9 +24,50 @@ describe('buildBobPrompt', () => {
     expect(p).toContain('secure-connect-db.zip')
   })
 
-  it('never includes tokens, passwords or the API key', () => {
+  it('shows OpenShift and Astra URLs plus placeholders, never the real secrets', () => {
     const p = buildBobPrompt(stateWith())
+    expect(p).toContain('Kubernetes API server: https://api.src.example:6443')
+    expect(p).toContain('{{OPENSHIFT_SOURCE_TOKEN}}')
+    expect(p).toContain('Astra Endpoint: https://abc-us-east-2.apps.astra.datastax.com')
+    expect(p).toContain('{{ASTRA_TOKEN}}')
     for (const secret of ['SRC-TOKEN-SECRET', 'SRC-PW-SECRET', 'API-KEY-SECRET']) expect(p).not.toContain(secret)
+  })
+
+  it('uses username/password placeholders when the source uses password auth', () => {
+    const s = stateWith()
+    s.source = { ...s.source, authMode: 'password', username: 'admin' }
+    const p = buildBobPrompt(s)
+    expect(p).toContain('username/password: admin / {{OPENSHIFT_SOURCE_PASSWORD}}')
+    expect(p).toContain('{{OPENSHIFT_SOURCE_PASSWORD}}')
+    expect(p).not.toContain('{{OPENSHIFT_SOURCE_TOKEN}}')
+  })
+
+  it('resolveBobPrompt substitutes the real credentials for the placeholders', () => {
+    const s = stateWith()
+    const out = resolveBobPrompt(buildBobPrompt(s), s)
+    expect(out).toContain('Authentication: bearer token: SRC-TOKEN-SECRET')
+    expect(out).toContain('Astra Token: AstraCS:API-KEY-SECRET')
+    expect(out).not.toContain('{{')
+  })
+
+  it('follows the two-step wording: deploy 3 ZDM pods first, then migrate', () => {
+    const p = buildBobPrompt(stateWith())
+    expect(p).toMatch(/^You are assisting in migrating Apache Cassandra database to Astra DB\. Follow these 2 steps in sequence\./)
+    expect(p).toContain('Step 1: You will first start with deploying DataStax Zero Down Time (ZDM)')
+    expect(p).toContain('check the 3 ZDM pods are in Running state before moving to the next step')
+    expect(p).toContain('Step 2: Migrate the Cassandra database to Astra.')
+    expect(p.indexOf('Step 1')).toBeLessThan(p.indexOf('Step 2'))
+    expect(p.indexOf('SOURCE (Apigee OPDK Cassandra)')).toBeLessThan(p.indexOf('Step 2'))
+    expect(p.indexOf('Step 2')).toBeLessThan(p.indexOf('Target Astra DB:'))
+    expect(p).toContain('Astra Source connection bundle: secure-connect-db.zip')
+  })
+
+  it('resolves HCD destination credentials', () => {
+    const s = stateWith({ targetId: 'hcd' })
+    s.destination = { ...s.destination, apiServer: 'https://api.dst.example:6443', namespace: 'hcd-ns', token: 'DST-TOKEN-SECRET' }
+    expect(buildBobPrompt(s)).toContain('{{OPENSHIFT_DESTINATION_TOKEN}}')
+    expect(buildBobPrompt(s)).not.toContain('DST-TOKEN-SECRET')
+    expect(resolveBobPrompt(buildBobPrompt(s), s)).toContain('bearer token: DST-TOKEN-SECRET')
   })
 
   it('describes the HCD cluster when HCD is the target', () => {
@@ -50,7 +91,9 @@ describe('BobConsole (Jobs API)', () => {
 
   it('sends nothing until Migrate is clicked', () => {
     renderConsole()
-    expect(screen.getByLabelText('Prompt')).toHaveValue(buildBobPrompt(stateWith()))
+    expect(screen.getByLabelText('Deployment Steps')).toHaveValue(buildBobPrompt(stateWith()))
+    expect(screen.queryByLabelText('Prompt')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Deployment Steps').value).not.toContain('SRC-TOKEN-SECRET')
     expect(fetch).not.toHaveBeenCalled()
   })
 
@@ -87,7 +130,13 @@ describe('BobConsole (Jobs API)', () => {
     const sent = JSON.parse(init.body)
     expect(Object.keys(sent)).toEqual(['prompt'])
     expect(sent.prompt).toContain('apigee-prod')
-    for (const secret of ['SRC-TOKEN-SECRET', 'SRC-PW-SECRET', 'API-KEY-SECRET']) expect(init.body).not.toContain(secret)
+    // the real credentials are substituted into what is sent, but never shown in the textarea
+    expect(sent.prompt).toContain('Kubernetes API server: https://api.src.example:6443')
+    expect(sent.prompt).toContain('bearer token: SRC-TOKEN-SECRET')
+    expect(sent.prompt).toContain('Astra Token: AstraCS:API-KEY-SECRET')
+    expect(sent.prompt).not.toContain('{{')
+    expect(screen.getByLabelText('Deployment Steps').value).not.toContain('SRC-TOKEN-SECRET')
+    expect(screen.getByLabelText('Deployment Steps').value).toContain('{{OPENSHIFT_SOURCE_TOKEN}}')
     const poll = fetch.mock.calls[1]
     expect(poll[0]).toBe('/api/bob/jobs/job-1')
     expect(poll[1].method).toBe('GET')

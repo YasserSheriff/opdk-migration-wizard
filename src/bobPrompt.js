@@ -1,43 +1,66 @@
 import { getTopology } from './topologies.js'
 
-// Builds the prompt sent to Bob from the wizard state.
-// Credentials (token, password, Astra API key) are NEVER included: the prompt only names the
-// connectivity endpoints and says that credentials are provided separately.
+// Builds the "Deployment Steps" text sent to Bob from the wizard state.
+// The text shown to the user contains placeholders ({{OPENSHIFT_TOKEN}}, ...) instead of secrets.
+// resolveBobPrompt() swaps the placeholders for the real values only when the job is submitted, so
+// tokens and passwords are never displayed in the page. The Astra secure connect bundle is a binary
+// zip and is not sent; only its file name is.
+
+// Placeholder -> value taken from the wizard state.
+function secretValues(state) {
+  const { source, destination, astra } = state
+  return {
+    '{{OPENSHIFT_SOURCE_TOKEN}}': source.token,
+    '{{OPENSHIFT_SOURCE_PASSWORD}}': source.password,
+    '{{OPENSHIFT_DESTINATION_TOKEN}}': destination.token,
+    '{{OPENSHIFT_DESTINATION_PASSWORD}}': destination.password,
+    '{{ASTRA_TOKEN}}': astra.apiKey,
+  }
+}
+
+// Replaces the placeholders with the real credentials. Call this just before sending.
+export function resolveBobPrompt(text, state) {
+  let out = text
+  for (const [placeholder, value] of Object.entries(secretValues(state))) {
+    out = out.split(placeholder).join(value || '')
+  }
+  return out
+}
+
+// Kubernetes/OpenShift connection lines. The credential is a placeholder, resolved at send time.
+function clusterLines(cluster, prefix) {
+  const auth =
+    cluster.authMode === 'token'
+      ? `- Authentication: bearer token: {{${prefix}_TOKEN}}`
+      : `- Authentication: username/password: ${cluster.username} / {{${prefix}_PASSWORD}}`
+  return [`- Kubernetes API server: ${cluster.apiServer}`, `- Namespace: ${cluster.namespace}`, auth]
+}
+
 export function buildBobPrompt(state) {
-  const topology = getTopology(state.topologyId)
   const { source, astra } = state
-  const n = topology.cassandraNodes
 
-  const destination =
+  const target =
     state.targetId === 'hcd'
-      ? [
-          'DESTINATION (DataStax HCD on Kubernetes)',
-          `- Kubernetes API server: ${state.destination.apiServer}`,
-          `- Namespace: ${state.destination.namespace}`,
-          '- Credentials: provided separately, not included here',
-        ]
+      ? ['Target DataStax HCD (OpenShift/Kubernetes):', ...clusterLines(state.destination, 'OPENSHIFT_DESTINATION')]
       : [
-          'DESTINATION (DataStax Astra DB)',
-          `- Astra host URL: ${astra.hostUrl}`,
-          `- Secure connect bundle: ${astra.bundle ? astra.bundle.name : '(not provided)'} (provided separately, not included here)`,
-          '- Astra application token: provided separately, not included here',
+          'Target Astra DB:',
+          `- Astra Endpoint: ${astra.hostUrl}`,
+          '- Astra Token: {{ASTRA_TOKEN}}',
+          `- Astra Source connection bundle: ${astra.bundle ? astra.bundle.name : '(not provided)'} (file name only; the bundle contents are not included)`,
         ]
 
-  const lines = [
-    'You are assisting with migrating the Cassandra database of a Google Apigee OPDK (Private Cloud, Edge v4.53.01) installation to the DataStax destination below using Zero Downtime Migration (ZDM).',
+  return [
+    'You are assisting in migrating Apache Cassandra database to Astra DB. Follow these 2 steps in sequence.',
+    '',
+    'Step 1: You will first start with deploying DataStax Zero Down Time (ZDM) to the namespace where the Cassandra is deployed. After it is deployed, check the 3 ZDM pods are in Running state before moving to the next step.',
+    '',
+    'Here is the namespace and OpenShift login information:',
     '',
     'SOURCE (Apigee OPDK Cassandra)',
-    `- OPDK topology: ${topology.name} (${n} Cassandra node${n > 1 ? 's' : ''})`,
-    `- Kubernetes API server: ${source.apiServer}`,
-    `- Namespace: ${source.namespace}`,
-    `- Authentication: ${source.authMode === 'token' ? 'bearer token' : 'username/password'} (credentials provided separately, not included here)`,
+    ...clusterLines(source, 'OPENSHIFT_SOURCE'),
     '',
-    ...destination,
+    'Step 2: Migrate the Cassandra database to ' + (state.targetId === 'hcd' ? 'DataStax HCD' : 'Astra') + '. Review the connectivity details above and list what must be reachable from the ZDM proxy to the source Cassandra nodes and to the destination.',
     '',
-    'TASK',
-    '1. Review the connectivity details above and list what must be reachable from the ZDM proxy to the source Cassandra nodes and to the destination.',
-    '2. Outline the ordered steps to deploy the ZDM proxy, export the Apigee keyspaces schema, create it on the destination, copy the data and verify it.',
-    '3. Flag any risks or missing information. Do not change or connect to any system; this is a read-only analysis.',
-  ]
-  return lines.join('\n')
+    ...target,
+  ].join('\n')
 }

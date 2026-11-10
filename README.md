@@ -13,7 +13,7 @@ Steps implemented so far (UI and validation only):
 5. **Migration**: the Bob console is at the top and the two progress sections below it. The progress bars stay at 0% until you click **Migrate** in the Bob console. Each section has its own progress bar and item list (Done / In progress / Pending), run in order:
    - **Connectivity and ZDM proxy**: connect to source, connect to destination (Astra or HCD cluster), deploy the Zero Downtime Migration (ZDM) proxy pods, validate connectivity from source to the ZDM proxy.
    - **Data migration**: export schema, create schema on the destination, copy data, verify migrated data.
-   - **Migrate with Gemini and IBM Bob** console, with the Gemini and IBM Bob logos next to the title (real, not simulated): shows a prompt built from the Source and Destination tabs (topology, Cassandra node count, source API server and namespace, Astra host URL and bundle file name, or the HCD cluster). **Migrate** starts the progress bars and submits the prompt to Bob as a background job (`POST /api/jobs`), checks the job status every 5 s, logs each check with a timestamp in the console, and shows status, tool calls and the output so far; **Cancel** cancels the running job. Tokens, passwords, the API key and the bundle contents are never put in the prompt. Nothing is sent until you click Migrate;
+   - **Migrate with Gemini and IBM Bob** console, with the Gemini and IBM Bob logos next to the title (real, not simulated): shows a prompt built from the Source and Destination tabs (topology, Cassandra node count, source API server and namespace, Astra host URL and bundle file name, or the HCD cluster). **Migrate** starts the progress bars and submits the prompt to Bob as a background job (`POST /api/jobs`), checks the job status every 5 s, logs each check with a timestamp in the console, and shows status, tool calls and the output so far; **Cancel** cancels the running job. The text under **Deployment Steps** (two steps: deploy the ZDM proxy and check that its 3 pods are Running, then migrate to the target) shows placeholders such as `{{OPENSHIFT_SOURCE_TOKEN}}` and `{{ASTRA_TOKEN}}`; the real tokens, passwords and Astra API key are substituted only when the job is submitted, so they are sent to Bob but never displayed. The bundle contents are not sent, only its file name. Nothing is sent until you click Migrate;
 
 Not implemented: the two progress bars in the Migration tab show **simulated** progress only (one placeholder phase every 1.5 s, see `src/components/MigrationStep.jsx`). No cluster is contacted and no data is moved. The phase list is a placeholder until the real steps are defined. Further steps are to be added.
 
@@ -65,7 +65,7 @@ The target project (default `opdk-migration-wizard`, input `namespace` on manual
 - `src/validation.js`: step definitions, validators
 - `server/`: production server and Bob proxy
 - `openshift/`, `Dockerfile`, `.github/workflows/deploy.yml`: deployment
-- `src/bobPrompt.js`: builds the Bob prompt from the wizard state (no secrets)
+- `src/bobPrompt.js`: builds the Deployment Steps text with placeholders, and substitutes the real credentials at submit time
 - `src/bobClient.js`: prompt call through the proxy
 - `src/components/`: step components (`BobConsole.jsx` is the Bob console)
 - `src/__tests__/`: unit and flow tests

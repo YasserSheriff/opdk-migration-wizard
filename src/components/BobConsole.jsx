@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { buildBobPrompt } from '../bobPrompt.js'
+import { buildBobPrompt, resolveBobPrompt } from '../bobPrompt.js'
 import geminiLogo from '../assets/gemini.svg'
 import bobLogo from '../assets/bob.svg'
 import { cancelJob, getJob, submitJob, TERMINAL_STATUSES } from '../bobClient.js'
@@ -79,7 +79,7 @@ export default function BobConsole({ state, pollMs = DEFAULT_POLL_MS, onMigrate 
     setSubmitting(true)
     failures.current = 0
     try {
-      const data = await submitJob(prompt)
+      const data = await submitJob(resolveBobPrompt(prompt, state))
       if (!alive.current) return
       if (!data.id) throw new Error('Bob did not return a job id')
       jobId.current = data.id
@@ -118,14 +118,17 @@ export default function BobConsole({ state, pollMs = DEFAULT_POLL_MS, onMigrate 
         <img src={bobLogo} alt="IBM Bob" className="console-logo" />
       </h3>
       <p className="hint">
-        Clicking Migrate submits the prompt below to Bob as a background job (via the local proxy) and
-        starts the progress bars below. The job status is checked every 5 seconds and each check is logged below. The prompt is
-        built from the Source and Destination tabs; tokens, passwords, API keys and the bundle file
-        contents are not included. The Bob API has no read-only or spending limit setting, so the
-        prompt only asks for a read-only analysis. Nothing is sent until you click Migrate.
+        Clicking Migrate submits the Deployment Steps below to Bob as a background job (via the local
+        proxy) and starts the progress bars below. Bob is told to deploy the ZDM proxy in the source
+        namespace and then migrate to the target, so it can change that cluster. The job status is
+        checked every 5 seconds and each check is logged below. Where the text shows a placeholder
+        such as {'{{OPENSHIFT_SOURCE_TOKEN}}'}, the token or API key you entered is substituted when
+        you click Migrate, so it is sent to Bob but never shown here. The bundle contents are not
+        sent, only its file name, so Bob cannot read the bundle from this page. Nothing is sent until
+        you click Migrate.
       </p>
 
-      <label htmlFor="bob-prompt">Prompt</label>
+      <label htmlFor="bob-prompt">Deployment Steps</label>
       <textarea
         id="bob-prompt"
         rows={14}
