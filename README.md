@@ -33,18 +33,38 @@ npm run build
 
 ## Bob proxy
 
-The console calls the Bob prompt API (`POST <route>/api/prompt` with `{"prompt": "..."}`). The browser cannot call it directly (no CORS headers), so `vite.config.js` adds a small middleware, `POST /api/bob/prompt`, that forwards the body to `${BOB_API_URL}/api/prompt`. It works with `npm run dev` and `npm run preview` only; a production deployment needs its own backend that does the same. Configure it with an environment variable (see `.env.example`; copy to the git-ignored `.env.local`):
+The console calls the Bob prompt API (`POST <route>/api/prompt` with `{"prompt": "..."}`). The browser cannot call it directly (no CORS headers), so the app has a small proxy, `POST /api/bob/prompt`, in `server/bobProxy.js`. It validates the body, forwards only the prompt to `${BOB_API_URL}/api/prompt` and waits up to 10 minutes. The same proxy is used by `npm run dev`/`npm run preview` (via `vite.config.js`) and by the production server `server/index.js`, which also serves `dist/` and `/healthz`, `/readyz`.
+
+Configure it with one environment variable (see `.env.example`; locally copy to the git-ignored `.env.local`):
 
 ```
 BOB_API_URL=https://<bob-acp-route>
 ```
 
-Without it the console shows "Bob proxy not configured". The endpoint used here has no authentication, so keep the route URL out of committed files. The API is synchronous: one request returns `{sessionId, output, updates[], result.stopReason}` when Bob finishes, which can take minutes (the proxy waits up to 10 minutes). There is no job id, so **Cancel** only stops waiting in the browser; Bob may still complete the request. The API has no read-only or spending-limit parameter, so read-only behaviour relies on the prompt text.
+Without it the console shows "Bob proxy not configured". The Bob endpoint has no authentication, so keep the route URL out of committed files. The API is synchronous: one request returns `{sessionId, output, updates[], result.stopReason}` when Bob finishes, which can take minutes. There is no job id, so **Cancel** only stops waiting in the browser; Bob may still complete the request. The API has no read-only or spending-limit parameter, so read-only behaviour relies on the prompt text.
+
+## Deploy to OpenShift (GitHub Actions)
+
+`.github/workflows/deploy.yml` runs on every push to `main` (and manually): tests and build, then, on `main` only, deploys. Pull requests run the tests only and never see secrets.
+
+GitHub repository secrets (Settings > Secrets and variables > Actions):
+
+| Secret | Value |
+| --- | --- |
+| `OPENSHIFT_SERVER` | API server URL, e.g. `https://c107-e.us-south.containers.cloud.ibm.com:31149` |
+| `OPENSHIFT_TOKEN` | Token of a user/service account that can edit the project |
+| `BOB_API_URL` | Base URL of the Bob prompt API route |
+
+Deploy steps: log in with `oc`; apply `openshift/01-builds.yaml` (ImageStream + binary BuildConfig); create/update the OpenShift **Secret `opdk-wizard-env`** from `BOB_API_URL`; build the image in the cluster (`Dockerfile`); apply `openshift/02-app.yaml` (Deployment pinned to the built image, Service, TLS Route) and wait for the rollout; smoke test. The Deployment loads the Secret with `envFrom`, and a hash of the secret values is stamped on the pod template, so rotating a GitHub secret and re-running the workflow restarts the pods with the new value.
+
+The target project (default `opdk-migration-wizard`, input `namespace` on manual runs) must already exist: `oc new-project opdk-migration-wizard`. To rotate the OpenShift token: `gh secret set OPENSHIFT_TOKEN`. Login tokens expire, so use a long-lived service-account token for anything beyond a demo.
 
 ## Layout
 
 - `src/topologies.js`: topology data
 - `src/validation.js`: step definitions, validators
+- `server/`: production server and Bob proxy
+- `openshift/`, `Dockerfile`, `.github/workflows/deploy.yml`: deployment
 - `src/bobPrompt.js`: builds the Bob prompt from the wizard state (no secrets)
 - `src/bobClient.js`: prompt call through the proxy
 - `src/components/`: step components (`BobConsole.jsx` is the Bob console)
