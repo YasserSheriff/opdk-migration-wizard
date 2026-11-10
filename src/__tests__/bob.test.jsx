@@ -1,9 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, fireEvent, act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { buildBobPrompt } from '../bobPrompt.js'
 import { initialState } from '../validation.js'
-import BobConsole from '../components/BobConsole.jsx'
+import BobConsole, { DEFAULT_POLL_MS } from '../components/BobConsole.jsx'
 
 const stateWith = (over = {}) => {
   const s = initialState()
@@ -91,6 +91,61 @@ describe('BobConsole (Jobs API)', () => {
     const poll = fetch.mock.calls[1]
     expect(poll[0]).toBe('/api/bob/jobs/job-1')
     expect(poll[1].method).toBe('GET')
+  })
+
+  it('checks the job status every 5 seconds by default', async () => {
+    expect(DEFAULT_POLL_MS).toBe(5000)
+    vi.useFakeTimers()
+    try {
+      fetch.mockImplementation((url, init) =>
+        init.method === 'POST' ? reply(job(), true, 202) : reply(job({ output: 'working' })),
+      )
+      render(<BobConsole state={stateWith()} />)
+      fireEvent.click(screen.getByRole('button', { name: 'Migrate' }))
+      await act(() => vi.advanceTimersByTimeAsync(0))
+      expect(fetch).toHaveBeenCalledTimes(1) // POST only
+      await act(() => vi.advanceTimersByTimeAsync(4999))
+      expect(fetch).toHaveBeenCalledTimes(1)
+      await act(() => vi.advanceTimersByTimeAsync(1))
+      expect(fetch).toHaveBeenCalledTimes(2) // first check at 5 s
+      await act(() => vi.advanceTimersByTimeAsync(5000))
+      expect(fetch).toHaveBeenCalledTimes(3) // second check at 10 s
+      expect(screen.getByLabelText('Bob status checks')).toHaveTextContent('Status check #2: running')
+      expect(screen.getByLabelText('Bob status checks')).toHaveTextContent('next check in 5s')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('reports each status check in the console, with the final one marked finished', async () => {
+    fetch
+      .mockImplementationOnce(() => reply(job({ status: 'queued' }), true, 202))
+      .mockImplementationOnce(() => reply(job({ status: 'queued', queuePosition: 2 })))
+      .mockImplementationOnce(() => reply(job({ toolCalls: 3 })))
+      .mockImplementation(() => reply(job({ status: 'completed', output: 'done', toolCalls: 3 })))
+    const user = userEvent.setup()
+    renderConsole()
+    await migrate(user)
+    const log = screen.getByLabelText('Bob status checks')
+    await waitFor(() => expect(log).toHaveTextContent('Status check #3: completed'))
+    expect(log).toHaveTextContent('Job submitted: job-1 (queued)')
+    expect(log).toHaveTextContent('Status check #1: queued, queue position 2')
+    expect(log).toHaveTextContent('Status check #2: running, 3 tool calls')
+    expect(log).toHaveTextContent('finished, no more checks')
+    expect(log.querySelectorAll('li')).toHaveLength(4)
+  })
+
+  it('logs failed status checks', async () => {
+    fetch
+      .mockImplementationOnce(() => reply(job(), true, 202))
+      .mockRejectedValueOnce(new Error('blip'))
+      .mockImplementation(() => reply(job({ status: 'completed', output: 'ok' })))
+    const user = userEvent.setup()
+    renderConsole()
+    await migrate(user)
+    const log = screen.getByLabelText('Bob status checks')
+    await waitFor(() => expect(log).toHaveTextContent('Status check #1: completed'))
+    expect(log).toHaveTextContent('Status check failed (1/3)')
   })
 
   it('stops polling once the job is terminal', async () => {

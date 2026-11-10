@@ -4,7 +4,7 @@ import geminiLogo from '../assets/gemini.svg'
 import bobLogo from '../assets/bob.svg'
 import { cancelJob, getJob, submitJob, TERMINAL_STATUSES } from '../bobClient.js'
 
-export const DEFAULT_POLL_MS = 3000
+export const DEFAULT_POLL_MS = 5000 // status check interval
 const MAX_POLL_FAILURES = 3 // consecutive failed status polls tolerated before giving up
 
 // Console that submits a Bob job (prompt built from the previous tabs) through the local proxy and
@@ -19,12 +19,16 @@ export default function BobConsole({ state, pollMs = DEFAULT_POLL_MS, onMigrate 
   const alive = useRef(true)
   const failures = useRef(0)
   const outputBox = useRef(null)
+  const [log, setLog] = useState([]) // timestamped status-check lines shown in the console
+  const checks = useRef(0)
+
+  const addLog = (text) => setLog((l) => [...l, { time: new Date().toLocaleTimeString(), text }])
 
   // Keep the fixed-size console following new output, unless the user has scrolled up to read.
   useEffect(() => {
     const el = outputBox.current
     if (el && el.scrollHeight - el.scrollTop - el.clientHeight < 40) el.scrollTop = el.scrollHeight
-  }, [job, submitting, error])
+  }, [job, submitting, error, log])
 
   useEffect(() => {
     alive.current = true
@@ -43,11 +47,19 @@ export default function BobConsole({ state, pollMs = DEFAULT_POLL_MS, onMigrate 
       const data = await getJob(jobId.current)
       if (!alive.current) return
       failures.current = 0
+      checks.current += 1
       setJob(data)
+      addLog(
+        `Status check #${checks.current}: ${data.status}` +
+          (data.toolCalls > 0 ? `, ${data.toolCalls} tool calls` : '') +
+          (data.status === 'queued' && data.queuePosition != null ? `, queue position ${data.queuePosition}` : '') +
+          (isTerminal(data) ? ' (finished, no more checks)' : `, next check in ${Math.round(pollMs / 1000)}s`),
+      )
       if (!isTerminal(data)) timer.current = setTimeout(poll, pollMs)
     } catch (e) {
       if (!alive.current) return
       failures.current += 1
+      addLog(`Status check failed (${failures.current}/${MAX_POLL_FAILURES}): ${e.message}`)
       if (failures.current >= MAX_POLL_FAILURES) {
         setError(`Lost contact with the job: ${e.message}`)
         setJob((j) => (j ? { ...j, status: 'unknown' } : j))
@@ -62,6 +74,8 @@ export default function BobConsole({ state, pollMs = DEFAULT_POLL_MS, onMigrate 
     clearTimeout(timer.current)
     setError('')
     setJob(null)
+    setLog([])
+    checks.current = 0
     setSubmitting(true)
     failures.current = 0
     try {
@@ -70,6 +84,7 @@ export default function BobConsole({ state, pollMs = DEFAULT_POLL_MS, onMigrate 
       if (!data.id) throw new Error('Bob did not return a job id')
       jobId.current = data.id
       setJob(data)
+      addLog(`Job submitted: ${data.id} (${data.status}). Checking status every ${Math.round(pollMs / 1000)}s.`)
       timer.current = setTimeout(poll, pollMs)
     } catch (e) {
       if (!alive.current) return
@@ -84,6 +99,7 @@ export default function BobConsole({ state, pollMs = DEFAULT_POLL_MS, onMigrate 
     try {
       const data = await cancelJob(jobId.current)
       if (!alive.current) return
+      addLog('Cancel requested: job cancelled.')
       setJob((j) => ({ ...j, ...data, status: data.status || 'cancelled' }))
     } catch (e) {
       if (!alive.current) return
@@ -103,7 +119,7 @@ export default function BobConsole({ state, pollMs = DEFAULT_POLL_MS, onMigrate 
       </h3>
       <p className="hint">
         Clicking Migrate submits the prompt below to Bob as a background job (via the local proxy) and
-        starts the progress bars below. The status is refreshed every few seconds. The prompt is
+        starts the progress bars below. The job status is checked every 5 seconds and each check is logged below. The prompt is
         built from the Source and Destination tabs; tokens, passwords, API keys and the bundle file
         contents are not included. The Bob API has no read-only or spending limit setting, so the
         prompt only asks for a read-only analysis. Nothing is sent until you click Migrate.
@@ -143,6 +159,12 @@ export default function BobConsole({ state, pollMs = DEFAULT_POLL_MS, onMigrate 
             </div>
             {job.lastActivityAt && !isTerminal(job) && <div>Last activity: {new Date(job.lastActivityAt).toLocaleTimeString()}</div>}
             {job.error && <div className="error">Error: {typeof job.error === 'string' ? job.error : JSON.stringify(job.error)}</div>}
+            <div className="console-title">Status checks</div>
+            <ul className="status-log" aria-label="Bob status checks">
+              {log.map((l, i) => (
+                <li key={i}><span className="log-time">{l.time}</span> {l.text}</li>
+              ))}
+            </ul>
             <div className="console-title">Output{isTerminal(job) ? '' : ' so far'}</div>
             <pre aria-label="Bob output">
               {job.output || (isTerminal(job) ? '(Bob returned no output text)' : '(waiting for output...)')}

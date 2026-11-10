@@ -57,6 +57,8 @@ progress { width: 100%; height: 16px; margin: 4px 0 16px; }
 .console-output .console-title { margin-top: 10px; color: #a8a8a8; text-transform: uppercase; font-size: 11px; }
 .console-output pre { white-space: pre-wrap; margin: 4px 0 0; font-family: ui-monospace, Menlo, monospace; }
 .console-output ul { margin: 4px 0 0; padding-left: 18px; }
+.console-output .status-log { list-style: none; padding-left: 0; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+.console-output .log-time { color: #a8a8a8; }
 
 .console-heading { display: flex; align-items: center; gap: 8px; }
 .console-logo { height: 24px; width: auto; }
