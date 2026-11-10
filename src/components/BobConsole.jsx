@@ -2,52 +2,90 @@ import { useEffect, useRef, useState } from 'react'
 import { buildBobPrompt } from '../bobPrompt.js'
 import geminiLogo from '../assets/gemini.svg'
 import bobLogo from '../assets/bob.svg'
-import { sendPrompt } from '../bobClient.js'
+import { cancelJob, getJob, submitJob, TERMINAL_STATUSES } from '../bobClient.js'
 
-// Console that sends a prompt (built from the previous tabs) to Bob through the local proxy and
-// shows the session, activity and output. Nothing is sent until Migrate is clicked.
-export default function BobConsole({ state, onMigrate }) {
+export const DEFAULT_POLL_MS = 3000
+const MAX_POLL_FAILURES = 3 // consecutive failed status polls tolerated before giving up
+
+// Console that submits a Bob job (prompt built from the previous tabs) through the local proxy and
+// polls its status. Nothing is sent until Migrate is clicked.
+export default function BobConsole({ state, pollMs = DEFAULT_POLL_MS, onMigrate }) {
   const [prompt, setPrompt] = useState(() => buildBobPrompt(state))
-  const [status, setStatus] = useState('idle') // idle | running | completed | cancelled | failed
-  const [result, setResult] = useState(null) // { sessionId, output, activity, stopReason }
+  const [job, setJob] = useState(null) // latest job object from the Bob Jobs API
+  const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
-  const controller = useRef(null)
+  const jobId = useRef(null)
+  const timer = useRef(null)
   const alive = useRef(true)
+  const failures = useRef(0)
 
   useEffect(() => {
     alive.current = true
     return () => {
       alive.current = false
-      controller.current?.abort()
+      clearTimeout(timer.current)
     }
   }, [])
 
-  const send = async () => {
-    if (onMigrate) onMigrate()
-    setError('')
-    setResult(null)
-    setStatus('running')
-    controller.current = new AbortController()
+  // 'unknown' is set locally when the job can no longer be tracked; it ends the active state too.
+  const isTerminal = (j) => TERMINAL_STATUSES.includes(j?.status) || j?.status === 'unknown'
+  const active = submitting || (job && !isTerminal(job))
+
+  const poll = async () => {
     try {
-      const data = await sendPrompt(prompt, controller.current.signal)
+      const data = await getJob(jobId.current)
       if (!alive.current) return
-      setResult(data)
-      setStatus('completed')
+      failures.current = 0
+      setJob(data)
+      if (!isTerminal(data)) timer.current = setTimeout(poll, pollMs)
     } catch (e) {
       if (!alive.current) return
-      if (e.name === 'AbortError') {
-        setStatus('cancelled')
+      failures.current += 1
+      if (failures.current >= MAX_POLL_FAILURES) {
+        setError(`Lost contact with the job: ${e.message}`)
+        setJob((j) => (j ? { ...j, status: 'unknown' } : j))
       } else {
-        setError(e.message)
-        setStatus('failed')
+        timer.current = setTimeout(poll, pollMs)
       }
     }
   }
 
-  // Stops waiting for the answer. The request is aborted on our side only; Bob may still finish it.
-  const cancel = () => controller.current?.abort()
+  const send = async () => {
+    if (onMigrate) onMigrate()
+    clearTimeout(timer.current)
+    setError('')
+    setJob(null)
+    setSubmitting(true)
+    failures.current = 0
+    try {
+      const data = await submitJob(prompt)
+      if (!alive.current) return
+      if (!data.id) throw new Error('Bob did not return a job id')
+      jobId.current = data.id
+      setJob(data)
+      timer.current = setTimeout(poll, pollMs)
+    } catch (e) {
+      if (!alive.current) return
+      setError(e.message)
+    } finally {
+      if (alive.current) setSubmitting(false)
+    }
+  }
 
-  const running = status === 'running'
+  const cancel = async () => {
+    clearTimeout(timer.current)
+    try {
+      const data = await cancelJob(jobId.current)
+      if (!alive.current) return
+      setJob((j) => ({ ...j, ...data, status: data.status || 'cancelled' }))
+    } catch (e) {
+      if (!alive.current) return
+      setError(e.message)
+      timer.current = setTimeout(poll, pollMs) // cancel failed: keep tracking the job
+    }
+  }
+
+  const canCancel = job && ['queued', 'running'].includes(job.status)
 
   return (
     <div className="panel bob-console">
@@ -57,11 +95,11 @@ export default function BobConsole({ state, onMigrate }) {
         <img src={bobLogo} alt="IBM Bob" className="console-logo" />
       </h3>
       <p className="hint">
-        Clicking Migrate sends the prompt below to Bob (via the local proxy) and starts the progress
-        bars below. The prompt is built from the Source and Destination tabs; tokens, passwords, API
-        keys and the bundle file contents are not included. The Bob API has no read-only or spending
-        limit setting, so the prompt only asks for a read-only analysis. Nothing is sent until you
-        click Migrate.
+        Clicking Migrate submits the prompt below to Bob as a background job (via the local proxy) and
+        starts the progress bars below. The status is refreshed every few seconds. The prompt is
+        built from the Source and Destination tabs; tokens, passwords, API keys and the bundle file
+        contents are not included. The Bob API has no read-only or spending limit setting, so the
+        prompt only asks for a read-only analysis. Nothing is sent until you click Migrate.
       </p>
 
       <label htmlFor="bob-prompt">Prompt</label>
@@ -70,46 +108,39 @@ export default function BobConsole({ state, onMigrate }) {
         rows={14}
         value={prompt}
         onChange={(e) => setPrompt(e.target.value)}
-        disabled={running}
+        disabled={active}
       />
 
       <div className="nav">
-        <button type="button" onClick={() => setPrompt(buildBobPrompt(state))} disabled={running}>
+        <button type="button" onClick={() => setPrompt(buildBobPrompt(state))} disabled={active}>
           Reset prompt
         </button>
-        <button type="button" className="primary" onClick={send} disabled={running || !prompt.trim()}>
+        <button type="button" className="primary" onClick={send} disabled={active || !prompt.trim()}>
           Migrate
         </button>
-        {running && <button type="button" onClick={cancel}>Cancel</button>}
+        {canCancel && <button type="button" onClick={cancel}>Cancel</button>}
       </div>
 
       {error && <p role="alert" className="error">{error}</p>}
 
-      {status !== 'idle' && (
+      {submitting && !job && (
+        <div className="console-output" aria-label="Bob console output">Submitting job...</div>
+      )}
+
+      {job && (
         <div className="console-output" aria-label="Bob console output">
           <div>
-            State: <strong>{status}</strong>
-            {result?.sessionId && <> &middot; Session: <code>{result.sessionId}</code></>}
-            {result?.stopReason && <> &middot; Stop reason: <code>{result.stopReason}</code></>}
+            Job: <code>{job.id}</code> &middot; Status: <strong>{job.status}</strong>
+            {job.status === 'queued' && job.queuePosition != null && <> &middot; Queue position: {job.queuePosition}</>}
+            {job.toolCalls > 0 && <> &middot; Tool calls: {job.toolCalls}</>}
+            {job.stopReason && <> &middot; Stop reason: <code>{job.stopReason}</code></>}
           </div>
-          {status === 'running' && <div>Waiting for Bob to finish (this can take a few minutes)...</div>}
-          {status === 'cancelled' && <div>Stopped waiting. Bob may still complete the request.</div>}
-          {result?.activity.length > 0 && (
-            <>
-              <div className="console-title">Activity</div>
-              <ul aria-label="Bob activity">
-                {result.activity.map((a, i) => (
-                  <li key={i}><code>{a}</code></li>
-                ))}
-              </ul>
-            </>
-          )}
-          {status === 'completed' && (
-            <>
-              <div className="console-title">Output</div>
-              <pre aria-label="Bob output">{result.output || '(Bob returned no output text)'}</pre>
-            </>
-          )}
+          {job.lastActivityAt && !isTerminal(job) && <div>Last activity: {new Date(job.lastActivityAt).toLocaleTimeString()}</div>}
+          {job.error && <div className="error">Error: {typeof job.error === 'string' ? job.error : JSON.stringify(job.error)}</div>}
+          <div className="console-title">Output{isTerminal(job) ? '' : ' so far'}</div>
+          <pre aria-label="Bob output">
+            {job.output || (isTerminal(job) ? '(Bob returned no output text)' : '(waiting for output...)')}
+          </pre>
         </div>
       )}
     </div>

@@ -114,7 +114,7 @@ jobs:
           host=$(oc get route opdk-migration-wizard -o jsonpath='{.spec.host}')
           for _ in $(seq 1 12); do
             # An empty body is rejected with 400 only if BOB_API_URL is configured (no Bob call is made).
-            code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{}' "https://$host/api/bob/prompt" || true)
+            code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{}' "https://$host/api/bob/jobs" || true)
             if curl -fsS "https://$host/readyz" >/dev/null && curl -fsS -o /dev/null "https://$host/" && [ "$code" = "400" ]; then
               echo "Deployed OK: https://$host"; exit 0
             fi

@@ -25,7 +25,7 @@ const bobDone = () =>
   Promise.resolve({
     ok: true,
     status: 200,
-    text: () => Promise.resolve(JSON.stringify({ sessionId: 's-1', output: 'ok', updates: [], result: { stopReason: 'end_turn' } })),
+    text: () => Promise.resolve(JSON.stringify({ id: 'job-1', status: 'completed', output: 'ok', stopReason: 'end_turn' })),
   })
 
 describe('wizard flow', () => {

@@ -80,8 +80,6 @@ if (isMain) {
   const distDir = process.env.STATIC_DIR || path.join(here, '..', 'dist')
   if (!process.env.BOB_API_URL) console.warn('BOB_API_URL is not set: the Bob console will report "not configured"')
   const server = createApp(process.env, distDir)
-  // A Bob run can take minutes; do not drop idle sockets while waiting for the answer.
-  server.requestTimeout = 0
   server.listen(port, () => console.log(`opdk-migration-wizard listening on :${port}, serving ${distDir}`))
   for (const sig of ['SIGTERM', 'SIGINT']) process.on(sig, () => server.close(() => process.exit(0)))
 }

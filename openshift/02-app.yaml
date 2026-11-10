@@ -60,8 +60,6 @@ metadata:
   name: opdk-migration-wizard
   labels: { app: opdk-migration-wizard, app.kubernetes.io/part-of: opdk-migration-wizard }
   annotations:
-    # A Bob run is a single synchronous request that can take minutes; raise the router timeout.
-    haproxy.router.openshift.io/timeout: 15m
 spec:
   to: { kind: Service, name: opdk-migration-wizard }
   port: { targetPort: http }

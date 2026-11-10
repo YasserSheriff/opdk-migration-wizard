@@ -39,101 +39,158 @@ describe('buildBobPrompt', () => {
   })
 })
 
-describe('BobConsole', () => {
+describe('BobConsole (Jobs API)', () => {
+  const POLL = 5
+  const job = (over = {}) => ({ id: 'job-1', status: 'running', toolCalls: 0, ...over })
+  const migrate = async (user) => user.click(screen.getByRole('button', { name: 'Migrate' }))
+  const renderConsole = (props = {}) => render(<BobConsole state={stateWith()} pollMs={POLL} {...props} />)
+
   beforeEach(() => { global.fetch = vi.fn() })
   afterEach(() => { vi.restoreAllMocks() })
 
   it('sends nothing until Migrate is clicked', () => {
-    render(<BobConsole state={stateWith()} />)
+    renderConsole()
     expect(screen.getByLabelText('Prompt')).toHaveValue(buildBobPrompt(stateWith()))
     expect(fetch).not.toHaveBeenCalled()
   })
 
-  it('posts the prompt to the proxy and shows session, activity and output', async () => {
-    fetch.mockImplementationOnce(() =>
-      reply({
-        sessionId: 'sess-1',
-        output: 'The plan.',
-        updates: [
-          { update: { sessionUpdate: 'available_commands_update', availableCommands: [] } },
-          { update: { sessionUpdate: 'tool_call', title: 'Read file', kind: 'read', status: 'completed' } },
-          { update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'The plan.' } } },
-        ],
-        result: { stopReason: 'end_turn' },
-      }),
-    )
+  it('submits a job, polls it and shows the final output', async () => {
+    fetch
+      .mockImplementationOnce(() => reply(job({ status: 'queued' }), true, 202))
+      .mockImplementationOnce(() => reply(job({ output: 'Partial', toolCalls: 2 })))
+      .mockImplementation(() => reply(job({ status: 'completed', output: 'The plan.', toolCalls: 2, stopReason: 'end_turn' })))
+    const onMigrate = vi.fn()
     const user = userEvent.setup()
-    render(<BobConsole state={stateWith()} />)
-    await user.click(screen.getByRole('button', { name: 'Migrate' }))
+    renderConsole({ onMigrate })
+    await migrate(user)
 
+    expect(onMigrate).toHaveBeenCalledTimes(1)
     await waitFor(() => expect(screen.getByLabelText('Bob output')).toHaveTextContent('The plan.'))
     expect(screen.getByText('completed')).toBeInTheDocument()
-    expect(screen.getByText('sess-1')).toBeInTheDocument()
-    const activity = screen.getByLabelText('Bob activity')
-    expect(activity).toHaveTextContent('tool_call: Read file - read - completed')
-    expect(activity).not.toHaveTextContent('available_commands_update')
+    expect(screen.getByText('job-1')).toBeInTheDocument()
+    expect(screen.getByText('end_turn')).toBeInTheDocument()
+    expect(screen.getByText(/Tool calls: 2/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Migrate' })).toBeEnabled()
+    expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument()
 
     const [url, init] = fetch.mock.calls[0]
-    expect(url).toBe('/api/bob/prompt')
+    expect(url).toBe('/api/bob/jobs')
     expect(init.method).toBe('POST')
     const sent = JSON.parse(init.body)
     expect(Object.keys(sent)).toEqual(['prompt'])
     expect(sent.prompt).toContain('apigee-prod')
-    expect(sent.prompt).not.toContain('SRC-TOKEN-SECRET')
+    for (const secret of ['SRC-TOKEN-SECRET', 'SRC-PW-SECRET', 'API-KEY-SECRET']) expect(init.body).not.toContain(secret)
+    const poll = fetch.mock.calls[1]
+    expect(poll[0]).toBe('/api/bob/jobs/job-1')
+    expect(poll[1].method).toBe('GET')
+  })
+
+  it('stops polling once the job is terminal', async () => {
+    fetch
+      .mockImplementationOnce(() => reply(job(), true, 202))
+      .mockImplementation(() => reply(job({ status: 'completed', output: 'done' })))
+    const user = userEvent.setup()
+    renderConsole()
+    await migrate(user)
+    await waitFor(() => expect(screen.getByLabelText('Bob output')).toHaveTextContent('done'))
+    const calls = fetch.mock.calls.length
+    await new Promise((r) => setTimeout(r, POLL * 6))
+    expect(fetch.mock.calls.length).toBe(calls)
+  })
+
+  it('shows the queue position while the job is queued', async () => {
+    fetch
+      .mockImplementationOnce(() => reply(job({ status: 'queued' }), true, 202))
+      .mockImplementationOnce(() => reply(job({ status: 'queued', queuePosition: 3 })))
+      .mockImplementation(() => reply(job({ status: 'queued', queuePosition: 3 })))
+    const user = userEvent.setup()
+    renderConsole()
+    await migrate(user)
+    expect(await screen.findByText(/Queue position: 3/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Migrate' })).toBeDisabled()
+  })
+
+  it('shows the error of a failed job', async () => {
+    fetch
+      .mockImplementationOnce(() => reply(job(), true, 202))
+      .mockImplementation(() => reply(job({ status: 'failed', error: 'agent crashed' })))
+    const user = userEvent.setup()
+    renderConsole()
+    await migrate(user)
+    expect(await screen.findByText(/Error: agent crashed/)).toBeInTheDocument()
+    expect(screen.getByText('failed')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Migrate' })).toBeEnabled()
   })
 
-  it('falls back to the streamed message chunks when output is empty', async () => {
-    fetch.mockImplementationOnce(() =>
-      reply({ sessionId: 's', output: '', updates: [
-        { update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Hello ' } } },
-        { update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'world' } } },
-      ] }),
-    )
+  it('says so when a finished job has no output text', async () => {
+    fetch
+      .mockImplementationOnce(() => reply(job(), true, 202))
+      .mockImplementation(() => reply(job({ status: 'completed', output: '' })))
     const user = userEvent.setup()
-    render(<BobConsole state={stateWith()} />)
-    await user.click(screen.getByRole('button', { name: 'Migrate' }))
-    await waitFor(() => expect(screen.getByLabelText('Bob output')).toHaveTextContent('Hello world'))
-  })
-
-  it('says so when there is no output text at all', async () => {
-    fetch.mockImplementationOnce(() => reply({ sessionId: 's', output: '', updates: [] }))
-    const user = userEvent.setup()
-    render(<BobConsole state={stateWith()} />)
-    await user.click(screen.getByRole('button', { name: 'Migrate' }))
+    renderConsole()
+    await migrate(user)
     await waitFor(() => expect(screen.getByLabelText('Bob output')).toHaveTextContent('Bob returned no output text'))
   })
 
-  it('shows an error when the proxy is unreachable', async () => {
+  it('Cancel sends DELETE for the job and shows it as cancelled', async () => {
+    fetch.mockImplementation((url, init) => {
+      if (init.method === 'POST') return reply(job(), true, 202)
+      if (init.method === 'DELETE') return reply({ id: 'job-1', status: 'cancelled' })
+      return reply(job({ output: 'working' }))
+    })
+    const user = userEvent.setup()
+    renderConsole()
+    await migrate(user)
+    await user.click(await screen.findByRole('button', { name: 'Cancel' }))
+    await waitFor(() => expect(screen.getByText('cancelled')).toBeInTheDocument())
+    const del = fetch.mock.calls.find(([, init]) => init.method === 'DELETE')
+    expect(del[0]).toBe('/api/bob/jobs/job-1')
+    expect(screen.getByRole('button', { name: 'Migrate' })).toBeEnabled()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('reports a job that disappeared (404 on poll)', async () => {
+    fetch
+      .mockImplementationOnce(() => reply(job(), true, 202))
+      .mockImplementation(() => reply({ error: 'Job not found' }, false, 404))
+    const user = userEvent.setup()
+    renderConsole()
+    await migrate(user)
+    expect(await screen.findByRole('alert')).toHaveTextContent(/Lost contact with the job.*not found/)
+    expect(screen.getByRole('button', { name: 'Migrate' })).toBeEnabled()
+  })
+
+  it('tolerates transient poll failures but gives up after three in a row', async () => {
+    fetch
+      .mockImplementationOnce(() => reply(job(), true, 202))
+      .mockRejectedValueOnce(new Error('blip'))
+      .mockImplementationOnce(() => reply(job({ output: 'still going' })))
+      .mockRejectedValue(new Error('down'))
+    const user = userEvent.setup()
+    renderConsole()
+    await migrate(user)
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(/Lost contact with the job.*down/)
+    // 1 POST + blip + success + 3 consecutive failures
+    expect(fetch).toHaveBeenCalledTimes(6)
+    expect(screen.getByRole('button', { name: 'Migrate' })).toBeEnabled()
+  })
+
+  it('shows an error when the proxy is unreachable on submit', async () => {
     fetch.mockRejectedValueOnce(new Error('Failed to fetch'))
     const user = userEvent.setup()
-    render(<BobConsole state={stateWith()} />)
-    await user.click(screen.getByRole('button', { name: 'Migrate' }))
+    renderConsole()
+    await migrate(user)
     expect(await screen.findByRole('alert')).toHaveTextContent(/Cannot reach the Bob proxy/)
     expect(screen.getByRole('button', { name: 'Migrate' })).toBeEnabled()
   })
 
-  it('shows proxy configuration and upstream errors', async () => {
+  it('shows proxy configuration errors on submit', async () => {
     fetch.mockImplementationOnce(() => reply({ error: 'Bob proxy not configured: set BOB_API_URL' }, false, 500))
     const user = userEvent.setup()
-    render(<BobConsole state={stateWith()} />)
-    await user.click(screen.getByRole('button', { name: 'Migrate' }))
+    renderConsole()
+    await migrate(user)
     expect(await screen.findByRole('alert')).toHaveTextContent('Bob proxy not configured')
-  })
-
-  it('Cancel stops waiting for a running request', async () => {
-    fetch.mockImplementationOnce((url, init) =>
-      new Promise((_, reject) => {
-        init.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })))
-      }),
-    )
-    const user = userEvent.setup()
-    render(<BobConsole state={stateWith()} />)
-    await user.click(screen.getByRole('button', { name: 'Migrate' }))
-    expect(screen.getByText(/Waiting for Bob to finish/)).toBeInTheDocument()
-    await user.click(await screen.findByRole('button', { name: 'Cancel' }))
-    await waitFor(() => expect(screen.getByText('cancelled')).toBeInTheDocument())
-    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Migrate' })).toBeEnabled()
   })
 })

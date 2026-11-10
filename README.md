@@ -13,7 +13,7 @@ Steps implemented so far (UI and validation only):
 5. **Migration**: the Bob console is at the top and the two progress sections below it. The progress bars stay at 0% until you click **Migrate** in the Bob console. Each section has its own progress bar and item list (Done / In progress / Pending), run in order:
    - **Connectivity and ZDM proxy**: connect to source, connect to destination (Astra or HCD cluster), deploy the Zero Downtime Migration (ZDM) proxy pods, validate connectivity from source to the ZDM proxy.
    - **Data migration**: export schema, create schema on the destination, copy data, verify migrated data.
-   - **Migrate with Gemini and IBM Bob** console, with the Gemini and IBM Bob logos next to the title (real, not simulated): shows a prompt built from the Source and Destination tabs (topology, Cassandra node count, source API server and namespace, Astra host URL and bundle file name, or the HCD cluster). **Migrate** starts the progress bars and sends the prompt to Bob (`POST /api/prompt`) and shows the session id, activity and output; **Cancel** stops waiting. Tokens, passwords, the API key and the bundle contents are never put in the prompt. Nothing is sent until you click Migrate;
+   - **Migrate with Gemini and IBM Bob** console, with the Gemini and IBM Bob logos next to the title (real, not simulated): shows a prompt built from the Source and Destination tabs (topology, Cassandra node count, source API server and namespace, Astra host URL and bundle file name, or the HCD cluster). **Migrate** starts the progress bars and submits the prompt to Bob as a background job (`POST /api/jobs`), polls the job status every 3 s and shows status, tool calls and the output so far; **Cancel** cancels the running job. Tokens, passwords, the API key and the bundle contents are never put in the prompt. Nothing is sent until you click Migrate;
 
 Not implemented: the two progress bars in the Migration tab show **simulated** progress only (one placeholder phase every 1.5 s, see `src/components/MigrationStep.jsx`). No cluster is contacted and no data is moved. The phase list is a placeholder until the real steps are defined. Further steps are to be added.
 
@@ -33,7 +33,7 @@ npm run build
 
 ## Bob proxy
 
-The console calls the Bob prompt API (`POST <route>/api/prompt` with `{"prompt": "..."}`). The browser cannot call it directly (no CORS headers), so the app has a small proxy, `POST /api/bob/prompt`, in `server/bobProxy.js`. It validates the body, forwards only the prompt to `${BOB_API_URL}/api/prompt` and waits up to 10 minutes. The same proxy is used by `npm run dev`/`npm run preview` (via `vite.config.js`) and by the production server `server/index.js`, which also serves `dist/` and `/healthz`, `/readyz`.
+The console uses the Bob Jobs API (see `<route>/docs`): `POST /api/jobs` with `{"prompt": "..."}` returns `202` and a job id immediately, and `GET /api/jobs/{id}` returns the status (`queued`, `running`, `completed`, `failed`, `cancelled`), `toolCalls`, `lastActivityAt`, `stopReason`, `error` and the `output` so far. `DELETE /api/jobs/{id}` cancels a running job. The browser cannot call Bob directly (no CORS headers), so the app has a small proxy in `server/bobProxy.js`: `POST /api/bob/jobs`, `GET /api/bob/jobs/:id` and `DELETE /api/bob/jobs/:id` are forwarded to `${BOB_API_URL}/api/jobs[/:id]`. It validates the body, forwards only the prompt, and does not expose the job list. The same proxy is used by `npm run dev`/`npm run preview` (via `vite.config.js`) and by the production server `server/index.js`, which also serves `dist/` and `/healthz`, `/readyz`.
 
 Configure it with one environment variable (see `.env.example`; locally copy to the git-ignored `.env.local`):
 
@@ -41,7 +41,7 @@ Configure it with one environment variable (see `.env.example`; locally copy to 
 BOB_API_URL=https://<bob-acp-route>
 ```
 
-Without it the console shows "Bob proxy not configured". The Bob endpoint has no authentication, so keep the route URL out of committed files. The API is synchronous: one request returns `{sessionId, output, updates[], result.stopReason}` when Bob finishes, which can take minutes. There is no job id, so **Cancel** only stops waiting in the browser; Bob may still complete the request. The API has no read-only or spending-limit parameter, so read-only behaviour relies on the prompt text.
+Without it the console shows "Bob proxy not configured". The Bob endpoint has no authentication, so keep the route URL out of committed files. Jobs are kept in Bob's memory only (lost if the Bob pod restarts, and removed some time after finishing), so a lost job shows "Bob job not found". At most a limited number of jobs run at once on the Bob side; the rest show `queued` with a queue position. The API has no read-only or spending-limit parameter, so read-only behaviour relies on the prompt text.
 
 ## Deploy to OpenShift (GitHub Actions)
 
