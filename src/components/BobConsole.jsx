@@ -18,6 +18,13 @@ export default function BobConsole({ state, pollMs = DEFAULT_POLL_MS, onMigrate 
   const timer = useRef(null)
   const alive = useRef(true)
   const failures = useRef(0)
+  const outputBox = useRef(null)
+
+  // Keep the fixed-size console following new output, unless the user has scrolled up to read.
+  useEffect(() => {
+    const el = outputBox.current
+    if (el && el.scrollHeight - el.scrollTop - el.clientHeight < 40) el.scrollTop = el.scrollHeight
+  }, [job, submitting, error])
 
   useEffect(() => {
     alive.current = true
@@ -123,26 +130,26 @@ export default function BobConsole({ state, pollMs = DEFAULT_POLL_MS, onMigrate 
 
       {error && <p role="alert" className="error">{error}</p>}
 
-      {submitting && !job && (
-        <div className="console-output" aria-label="Bob console output">Submitting job...</div>
-      )}
-
-      {job && (
-        <div className="console-output" aria-label="Bob console output">
-          <div>
-            Job: <code>{job.id}</code> &middot; Status: <strong>{job.status}</strong>
-            {job.status === 'queued' && job.queuePosition != null && <> &middot; Queue position: {job.queuePosition}</>}
-            {job.toolCalls > 0 && <> &middot; Tool calls: {job.toolCalls}</>}
-            {job.stopReason && <> &middot; Stop reason: <code>{job.stopReason}</code></>}
-          </div>
-          {job.lastActivityAt && !isTerminal(job) && <div>Last activity: {new Date(job.lastActivityAt).toLocaleTimeString()}</div>}
-          {job.error && <div className="error">Error: {typeof job.error === 'string' ? job.error : JSON.stringify(job.error)}</div>}
-          <div className="console-title">Output{isTerminal(job) ? '' : ' so far'}</div>
-          <pre aria-label="Bob output">
-            {job.output || (isTerminal(job) ? '(Bob returned no output text)' : '(waiting for output...)')}
-          </pre>
-        </div>
-      )}
+      <div className="console-output" ref={outputBox} tabIndex={0} aria-label="Bob console output">
+        {!job && !submitting && <div className="console-idle">Ready. Click Migrate to submit the prompt to Bob.</div>}
+        {submitting && !job && <div>Submitting job...</div>}
+        {job && (
+          <>
+            <div>
+              Job: <code>{job.id}</code> &middot; Status: <strong>{job.status}</strong>
+              {job.status === 'queued' && job.queuePosition != null && <> &middot; Queue position: {job.queuePosition}</>}
+              {job.toolCalls > 0 && <> &middot; Tool calls: {job.toolCalls}</>}
+              {job.stopReason && <> &middot; Stop reason: <code>{job.stopReason}</code></>}
+            </div>
+            {job.lastActivityAt && !isTerminal(job) && <div>Last activity: {new Date(job.lastActivityAt).toLocaleTimeString()}</div>}
+            {job.error && <div className="error">Error: {typeof job.error === 'string' ? job.error : JSON.stringify(job.error)}</div>}
+            <div className="console-title">Output{isTerminal(job) ? '' : ' so far'}</div>
+            <pre aria-label="Bob output">
+              {job.output || (isTerminal(job) ? '(Bob returned no output text)' : '(waiting for output...)')}
+            </pre>
+          </>
+        )}
+      </div>
     </div>
   )
 }

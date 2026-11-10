@@ -54,6 +54,14 @@ describe('BobConsole (Jobs API)', () => {
     expect(fetch).not.toHaveBeenCalled()
   })
 
+  it('shows the scrollable console box (focusable, idle text) before anything is sent', () => {
+    renderConsole()
+    const box = screen.getByLabelText('Bob console output')
+    expect(box).toHaveClass('console-output')
+    expect(box).toHaveAttribute('tabindex', '0')
+    expect(box).toHaveTextContent('Click Migrate')
+  })
+
   it('submits a job, polls it and shows the final output', async () => {
     fetch
       .mockImplementationOnce(() => reply(job({ status: 'queued' }), true, 202))
